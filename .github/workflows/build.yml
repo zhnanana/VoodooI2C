@@ -1,0 +1,63 @@
+
+name: Build VoodooI2C Kext
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build on macOS
+    runs-on: macos-latest
+    env:
+      PROJECT_TYPE: KEXT
+      JOB_TYPE: BUILD
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 500
+
+      - name: Checkout MacKernelSDK
+        uses: actions/checkout@v4
+        with:
+          repository: acidanthera/MacKernelSDK
+          path: MacKernelSDK
+
+      - name: VoodooInput Bootstrap
+        run: |
+          src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/acidanthera/VoodooInput/master/VoodooInput/Scripts/bootstrap.sh) && eval "$src" && mv VoodooInput Dependencies
+
+      - name: Build release kext
+        run: |
+          xcodebuild \
+            -workspace VoodooI2C.xcworkspace \
+            -scheme VoodooI2C \
+            -configuration Release \
+            -sdk macosx \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_ALLOWED=NO \
+            CONFIGURATION_BUILD_DIR="${GITHUB_WORKSPACE}/build/Release" \
+            build
+
+      - name: Verify kext
+        run: |
+          file build/Release/VoodooI2C.kext/Contents/MacOS/VoodooI2C
+          plutil -p build/Release/VoodooI2C.kext/Contents/Info.plist
+
+      - name: Package kext
+        run: |
+          cd build/Release
+          zip -r VoodooI2C.zip VoodooI2C.kext
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoodooI2C-${{ github.sha }}
+          path: build/Release/VoodooI2C.zip
+          retention-days: 30
+          if-no-files-found: error
