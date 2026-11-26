@@ -4,35 +4,83 @@ name: Build VoodooI2C Kext
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build on macOS
+    name: Build Custom VoodooI2C on macOS
     runs-on: macos-latest
-    env:
-      PROJECT_TYPE: KEXT
-      JOB_TYPE: BUILD
 
     steps:
-      - name: Checkout repository
+      # 1. 检出已经确认包含 Cirrus 接口的上游源码
+      - name: Checkout custom VoodooI2C source
         uses: actions/checkout@v4
         with:
+          repository: hoaug-tran/VoodooI2C
+          ref: 1a1ae9a26a74ec6b7e32a5d07f6a6ae9413bf298
+          path: VoodooI2C-src
           submodules: recursive
-          fetch-depth: 500
+          fetch-depth: 1
 
+      # 2. 检出 MacKernelSDK
       - name: Checkout MacKernelSDK
         uses: actions/checkout@v4
         with:
           repository: acidanthera/MacKernelSDK
-          path: MacKernelSDK
+          path: VoodooI2C-src/MacKernelSDK
+          fetch-depth: 1
 
-      - name: VoodooInput Bootstrap
+      # 3. 准备 VoodooInput
+      - name: Bootstrap VoodooInput
+        working-directory: VoodooI2C-src
         run: |
-          src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/acidanthera/VoodooInput/master/VoodooInput/Scripts/bootstrap.sh) && eval "$src" && mv VoodooInput Dependencies
+          set -e
+          src=$(/usr/bin/curl -Lfs \
+            https://raw.githubusercontent.com/acidanthera/VoodooInput/master/VoodooInput/Scripts/bootstrap.sh)
+          eval "$src"
+          mv VoodooInput Dependencies
 
-      - name: Build release kext
+      # 4. 确认源码确实包含定制接口
+      - name: Verify custom source interface
+        working-directory: VoodooI2C-src
         run: |
+          set -e
+          echo "Checking custom interface in source..."
+
+          grep -Rni -E \
+            'VoodooI2CTransferToAddress|transferI2CToAddress' \
+            VoodooI2C
+
+      # 5. 显示构建环境
+      - name: Show build environment
+        run: |
+          echo "===== macOS ====="
+          sw_vers
+
+          echo "===== Xcode ====="
+          xcodebuild -version
+
+          echo "===== Source commit ====="
+          git -C VoodooI2C-src rev-parse HEAD
+
+          echo "===== Workspace ====="
+          ls -la VoodooI2C-src/VoodooI2C.xcworkspace
+
+      # 6. 编译 Release 版本
+      - name: Build Release kext
+        working-directory: VoodooI2C-src
+        run: |
+          set -e
+
           xcodebuild \
             -workspace VoodooI2C.xcworkspace \
             -scheme VoodooI2C \
@@ -44,20 +92,66 @@ jobs:
             CONFIGURATION_BUILD_DIR="${GITHUB_WORKSPACE}/build/Release" \
             build
 
-      - name: Verify kext
+      # 7. 检查编译产物
+      - name: Verify compiled kext
         run: |
-          file build/Release/VoodooI2C.kext/Contents/MacOS/VoodooI2C
-          plutil -p build/Release/VoodooI2C.kext/Contents/Info.plist
+          set -e
 
+          KEXT="build/Release/VoodooI2C.kext"
+          BIN="$KEXT/Contents/MacOS/VoodooI2C"
+
+          echo "===== Check kext ====="
+          test -d "$KEXT"
+          test -f "$BIN"
+
+          echo "===== Binary architecture ====="
+          file "$BIN"
+
+          echo "===== Check custom interface ====="
+          if strings -a "$BIN" | grep -F "VoodooI2CTransferToAddress"; then
+            echo "SUCCESS: Custom Cirrus I2C interface found."
+          else
+            echo "ERROR: Custom Cirrus I2C interface missing!"
+            exit 1
+          fi
+
+          echo "===== Bundle information ====="
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$KEXT/Contents/Info.plist"
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleVersion" \
+            "$KEXT/Contents/Info.plist"
+
+      # 8. 打包
       - name: Package kext
         run: |
-          cd build/Release
-          zip -r VoodooI2C.zip VoodooI2C.kext
+          set -e
+          mkdir -p artifact
 
+          cd build/Release
+          zip -r "${GITHUB_WORKSPACE}/artifact/VoodooI2C-Cirrus.zip" \
+            VoodooI2C.kext
+
+          cd "$GITHUB_WORKSPACE"
+          shasum -a 256 artifact/VoodooI2C-Cirrus.zip
+
+      # 9. 上传编译产物
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VoodooI2C-${{ github.sha }}
-          path: build/Release/VoodooI2C.zip
+          name: VoodooI2C-Cirrus-${{ github.run_number }}
+          path: artifact/VoodooI2C-Cirrus.zip
           retention-days: 30
           if-no-files-found: error
+
+      # 10. 输出构建信息
+      - name: Build summary
+        run: |
+          echo "================================"
+          echo "Custom VoodooI2C build completed"
+          echo "Source repository: hoaug-tran/VoodooI2C"
+          echo "Source commit: 1a1ae9a26a74ec6b7e32a5d07f6a6ae9413bf298"
+          echo "Artifact: VoodooI2C-Cirrus.zip"
+          echo "================================"
